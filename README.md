@@ -10,8 +10,8 @@
 
 # Instant admin panel for your app
 
-Get a custom Node.js admin panel. Create pages to **view and manage data in your database**, <br />
-or **build fully custom pages** from scratch. Secure, self-hosted, and easy to set up.
+Get a custom Node.js admin panel. Create pages to **view and manage data in your database tables**, <br />
+**compose dashboards**, or build fully custom pages. Secure, self-hosted, and easy to set up.
   
 </div>
 
@@ -91,7 +91,7 @@ See [CONTRIBUTING.md](https://github.com/kottster/kottster/blob/main/CONTRIBUTIN
 
 - 💬 [Join our Discord](https://discord.com/invite/Qce9uUqK98)
 - 📬 [Contact us](https://kottster.app/contact-us)
-- ✉️ [team@kottster.io](mailto:team@kottster.io)
+- ✉️ [team@kottster.app](mailto:team@kottster.app)
 
 ## License
 

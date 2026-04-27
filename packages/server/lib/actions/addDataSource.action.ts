@@ -1,29 +1,14 @@
-import { DataSourceType, stripIndent, dataSourcesTypeData } from "@kottster/common";
+import { DataSourceType, stripIndent, dataSourcesTypeData, InternalApiInput, InternalApiResult } from "@kottster/common";
 import { exec } from "child_process";
 import spawn from 'cross-spawn';
 import { PROJECT_DIR } from "../constants/projectDir";
 import { DevAction } from "../models/action.model";
 import randomstring from 'randomstring';
-
-interface Data {
-  type: DataSourceType;
-
-  replaceDataSource?: string;
-  
-  connectionDetails: {
-    /** The connection details */
-    connection: string | Record<string, any>;
-
-    /** The database schema if applicable */
-    searchPath?: string[];
-  };
-
-  /** The name of the data source to be created or replaced */
-  name?: string;
-}
+import path from "path";
+import fs from "fs";
 
 /**
- * Verify and add data source to the project
+ * Add data source to the project
  */
 export class AddDataSource extends DevAction {
   private readonly dbDataStartMarker = '__DB_DATA_START__';
@@ -34,17 +19,32 @@ export class AddDataSource extends DevAction {
   private readonly dbErrorEndMarker = '__DB_ERROR_END__';
   private readonly dbErrorRegex = new RegExp(`${this.dbErrorStartMarker}(.*?)${this.dbErrorEndMarker}`, 's');
 
-  public async executeDevAction(data: Data) {
+  public async execute(data: InternalApiInput<'addDataSource'>): Promise<InternalApiResult<'addDataSource'>> {
     return new Promise((resolve, reject) => {
       const { type, connectionDetails, name } = data;
       const executableCode = this.getExecutableCode(type, connectionDetails);
 
-      const child = spawn('node', [
-        '--no-warnings',
-        '--input-type=module',
-        '-e',
-        executableCode
-      ], {
+      if (!Object.values(DataSourceType).includes(type)) {
+        reject(new Error(`Unsupported data source type: ${type}`));
+        return;
+      }
+
+      // Create local tmp file inside project
+      const tmpDir = path.join(PROJECT_DIR, 'tmp');
+      try {
+        if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+      } catch (err) {
+        return reject(new Error(`Failed to create tmp folder: ${err}`));
+      }
+      const tempFilePath = path.join(tmpDir, `data-source-connection-check-${Date.now()}.mjs`);
+      try {
+        fs.writeFileSync(tempFilePath, executableCode, 'utf8');
+      } catch (err) {
+        return reject(new Error(`Failed to write temp file: ${err}`));
+      }
+
+      // Run the temp file in a child process
+      const child = spawn('node', ['--no-warnings', tempFilePath], {
         stdio: 'pipe'
       });
 
@@ -62,10 +62,17 @@ export class AddDataSource extends DevAction {
       
       // Handle process close
       child.on('close', (code) => {
+        // Clean up temp file
+        try {
+          fs.unlinkSync(tempFilePath);
+          // eslint-disable-next-line no-empty
+        } catch {}
+
         // Parse the received data
         const dbDataMatch = stdOutput.match(this.dbDataRegex);
         let data = {
           tableCount: 0,
+          tablesHavePrimaryKeys: false,
         };
         if (dbDataMatch && dbDataMatch[1]) {
           try {
@@ -108,6 +115,12 @@ export class AddDataSource extends DevAction {
           return;
         }
 
+        // If tables do not have primary keys, reject with an error
+        if (!data.tablesHavePrimaryKeys) {
+          reject(new Error(`Seems like we can't detect primary keys in any of your database tables. The probable reason is that the database user you are using does not have enough permissions to access this information. Please make sure the user has sufficient privileges.`));
+          return;
+        }
+
         const postfix = randomstring.generate({
           length: 6,
           charset: '1234567890abcdefghijklmnopqrstuvwxyz'
@@ -121,7 +134,7 @@ export class AddDataSource extends DevAction {
             return;
           }
 
-          resolve(data);
+          resolve();
         });
       });
       
@@ -132,7 +145,7 @@ export class AddDataSource extends DevAction {
     });
   }
 
-  private getExecutableCode(type: DataSourceType, connectionDetails: Data['connectionDetails']) {
+  private getExecutableCode(type: DataSourceType, connectionDetails: InternalApiInput<'addDataSource'>['connectionDetails']) {
     const dataSourceData = dataSourcesTypeData[type];
 
     const adapterClassName = this.getAdapterClassName(type);
@@ -147,8 +160,7 @@ export class AddDataSource extends DevAction {
         init: () => {
           const client = knex({
             client: '${dataSourceData.knexClientStr}',
-            connection: ${JSON.stringify(connectionDetails.connection)},
-            ${connectionDetails.searchPath ? `searchPath: ${JSON.stringify(connectionDetails.searchPath)},` : ''}
+            ...(${JSON.stringify(connectionDetails)}),
           });
 
           return new ${adapterClassName}(client);
@@ -158,8 +170,9 @@ export class AddDataSource extends DevAction {
 
       try {
         const client = dataSource.adapter.getClient();
-        const databaseTableCount = await dataSource.adapter.getDatabaseTableCount();
-        process.stdout.write('${this.dbDataStartMarker}' + JSON.stringify({ tableCount: databaseTableCount }) + '${this.dbDataEndMarker}');
+        const databaseSchema = await dataSource.adapter.getDatabaseSchema();
+        const tablesHavePrimaryKeys = await dataSource.adapter.checkIfAnyTableHasPrimaryKey(databaseSchema);
+        process.stdout.write('${this.dbDataStartMarker}' + JSON.stringify({ tableCount: databaseSchema.tables.length, tablesHavePrimaryKeys }) + '${this.dbDataEndMarker}');
       } catch (err) {
         process.stdout.write('${this.dbErrorStartMarker}' + JSON.stringify((err && err.message) ? err.message : err) + '${this.dbErrorEndMarker}');
       } finally {
@@ -168,8 +181,8 @@ export class AddDataSource extends DevAction {
     `);
   }
 
-  private getCommand(type: DataSourceType, name: string, connectionDetails: Data['connectionDetails']) {
-    const dataOption = JSON.stringify(connectionDetails).replace(/"/g, '\\"');
+  private getCommand(type: DataSourceType, name: string, connectionDetails: InternalApiInput<'addDataSource'>['connectionDetails']) {
+    const dataOption = Buffer.from(JSON.stringify({ connectionDetails })).toString('base64');
 
     return `npm run dev:add-data-source ${type} -- --skipInstall --name "${name}" --data "${dataOption}"`;
   }

@@ -2,6 +2,8 @@ import path from 'path'
 import fs from 'fs'
 import { dataSourcesTypeData, DataSourceType } from '@kottster/common'
 import { FileTemplateManager } from './fileTemplateManager.service'
+import { VERSION } from '../version'
+import { PackageManager } from '../models/packageManager'
 
 interface FileCreatorOptions {
   projectDir?: string
@@ -10,14 +12,18 @@ interface FileCreatorOptions {
 
 interface CreateProjectOptions {
   projectName: string;
+  packageManager: PackageManager;
 }
 
 interface PackageJsonOptions {
-  name: string
-  type?: 'module'
-  version?: string
-  dependencies?: Record<string, string>
-  devDependencies?: Record<string, string>
+  name: string;
+  type?: 'module';
+  version?: string;
+  dependencies?: Record<string, string>;
+  devDependencies?: Record<string, string>;
+  pnpm?: {
+    onlyBuiltDependencies?: string[];
+  }
 }
 
 type EnvOptions = {
@@ -62,6 +68,7 @@ export class FileCreator {
     this.createDir()
     this.createDir('app')
     this.createDir('app/pages')
+    this.createDir('app/schemas')
     this.createDir('app/_server')
     this.createDir('app/_server/data-sources')
 
@@ -69,14 +76,20 @@ export class FileCreator {
     this.createPackageJson({ 
       name: options.projectName,
       dependencies: {},
-      devDependencies: this.usingTsc ? this.getTypescriptDependencies() : {}
-    })
+      devDependencies: this.usingTsc ? this.getTypescriptDependencies() : {},
+      pnpm: options.packageManager === 'pnpm' ? {
+        onlyBuiltDependencies: ['better-sqlite3'],
+      } : undefined,
+    });
     this.createGitIgnore()
     
     // Create files
     this.createFileFromTemplate('vite.config.js', path.join(this.projectDir, `vite.config.${this.jsExt}`));
+    this.createFileFromTemplate('Dockerfile', path.join(this.projectDir, 'Dockerfile'));
+    this.createFileFromTemplate('docker-compose.yml', path.join(this.projectDir, 'docker-compose.yml'));
     this.createFileFromTemplate('app/index.html', path.join(this.projectDir, `app/index.html`));
     this.createFileFromTemplate('app/main.jsx', path.join(this.projectDir, `app/main.${this.jsxExt}`));
+    this.createFileFromTemplate('app/schemas/sidebar.json', path.join(this.projectDir, `app/schemas/sidebar.json`));
     this.createFileFromTemplate('app/_server/app.js', path.join(this.projectDir, `app/_server/app.${this.jsExt}`));
     this.createFileFromTemplate('app/_server/server.js', path.join(this.projectDir, `app/_server/server.${this.jsExt}`));
     if (this.usingTsc) {
@@ -134,7 +147,7 @@ export class FileCreator {
    * Create a package.json file
    * @param options The package.json content
    */
-  private createPackageJson (options: PackageJsonOptions) {
+  private createPackageJson(options: PackageJsonOptions) {
     const packageJsonPath = path.join(this.projectDir, 'package.json')
 
     const {
@@ -153,19 +166,23 @@ export class FileCreator {
       scripts: {
         'dev': 'kottster dev',
         'dev:add-data-source': 'kottster add-data-source',
+        'dev:upgrade-kottster': 'kottster upgrade',
         "build": "vite build && kottster build:server",
         "start": "node dist/server/server.cjs"
       },
       dependencies: {
         'react': '^19.x',
         'react-dom': '^19.x',
-        "react-router-dom": "^7.x",
+        'react-router-dom': '^7.x',
+        'better-sqlite3': '^12.x',
 
-        '@kottster/common': KOTTSTER_COMMON_DEP_VER ?? '^3.x',
-        '@kottster/cli': KOTTSTER_CLI_DEP_VER ?? '^3.x',
-        '@kottster/server': KOTTSTER_SERVER_DEP_VER ?? '^3.x',
-        '@kottster/react': KOTTSTER_REACT_DEP_VER ?? '^3.x',
-        
+        // Using exact same version as the CLI.
+        // This ensures compatibility between the core packages
+        '@kottster/common': KOTTSTER_COMMON_DEP_VER ?? VERSION,
+        '@kottster/cli': KOTTSTER_CLI_DEP_VER ?? VERSION,
+        '@kottster/server': KOTTSTER_SERVER_DEP_VER ?? VERSION,
+        '@kottster/react': KOTTSTER_REACT_DEP_VER ?? VERSION,
+
         ...(options.dependencies ?? {}),
       },
       devDependencies: {
@@ -180,6 +197,7 @@ export class FileCreator {
       engines: {
         node: '>=20',
       },
+      pnpm: options.pnpm || undefined,
     }
     const packageJsonContent = JSON.stringify(packageJson, null, 2)
 
@@ -204,7 +222,7 @@ export class FileCreator {
    */
   private createGitIgnore (): void {
     const gitIgnorePath = path.join(this.projectDir, '.gitignore')
-    const gitIgnoreContent = ['node_modules', 'nbuild', 'npm-debug.log', '.DS_Store', '.cache'].join('\n')
+    const gitIgnoreContent = ['node_modules', 'nbuild', 'npm-debug.log', '.DS_Store', '.cache', 'tmp'].join('\n')
 
     this.writeFile(gitIgnorePath, gitIgnoreContent)
   }

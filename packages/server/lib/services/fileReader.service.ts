@@ -1,31 +1,29 @@
 import fs from "fs";
 import { PROJECT_DIR } from "../constants/projectDir";
 import path from "path";
-import { PageFileStructure, File, AppSchema, Page, DataSource } from "@kottster/common";
+import { PageFileStructure, File, AppSchema, Page, DataSource, readAppSchema } from "@kottster/common";
 
 /**
  * Service for reading files
  */
 export class FileReader {
+  constructor(private readonly isDevelopment?: boolean) {}
 
   /**
    * Read the schema from the kottster-app.json file
    */
-  public readSchemaJsonFile(): AppSchema {
-    const filePath = `${PROJECT_DIR}/kottster-app.json`;
-    if (!fs.existsSync(filePath)) {
-      throw new Error(`File not found: ${filePath}`);
-    }
-
-    const content = fs.readFileSync(filePath, 'utf8');
-    return JSON.parse(content);
+  public readAppSchema(): AppSchema {
+    return readAppSchema(PROJECT_DIR, this.isDevelopment ?? false);
   }
 
   /**
    * Read the package.json file
    * @returns The package.json content
    */
-  public readPackageJson(): unknown {
+  public readPackageJson(): {
+    version?: string;
+    dependencies?: Record<string, string>;
+  } {
     const filePath = `${PROJECT_DIR}/package.json`;
     if (!fs.existsSync(filePath)) {
       throw new Error(`File not found: ${filePath}`);
@@ -40,7 +38,7 @@ export class FileReader {
    * @returns The page directories
    */
   public getPagesDirectories(): string[] {
-    const dir = `${PROJECT_DIR}/app/pages`;
+    const dir = this.isDevelopment ? `${PROJECT_DIR}/app/pages` : `${PROJECT_DIR}/dist/server/pages`;
     if (!fs.existsSync(dir)) {
       return [];
     }
@@ -53,7 +51,7 @@ export class FileReader {
    * @returns The data source directories
    */
   public getDataSourceDirectories(): string[] {
-    const dir = `${PROJECT_DIR}/app/_server/data-sources`;
+    const dir = this.isDevelopment ? `${PROJECT_DIR}/app/_server/data-sources` : `${PROJECT_DIR}/dist/server/data-sources`;
     if (!fs.existsSync(dir)) {
       return [];
     }
@@ -70,7 +68,7 @@ export class FileReader {
     const result: Omit<DataSource, 'status' | 'adapter'>[] = [];
 
     for (const dir of dataSourceDirectories) {
-      const dataSourceJsonPath = path.join(PROJECT_DIR, `app/_server/data-sources/${dir}/dataSource.json`);
+      const dataSourceJsonPath = path.join(PROJECT_DIR, this.isDevelopment ? `app/_server/data-sources/${dir}/dataSource.json` : `dist/server/data-sources/${dir}/dataSource.json`);
       if (!fs.existsSync(dataSourceJsonPath)) {
         console.warn(`Data source config not found for directory: ${dir}`);
         continue;
@@ -80,7 +78,6 @@ export class FileReader {
         const content = fs.readFileSync(dataSourceJsonPath, 'utf8');
         const config = JSON.parse(content);
         result.push({ 
-          version: config.version,
           name: dir, 
           type: config.type,
           tablesConfig: config.tablesConfig || {},
@@ -116,6 +113,10 @@ export class FileReader {
 
       try {
         const pageJsonContent = JSON.parse(pageJsonFile.fileContent) as Omit<Page, 'id'>;
+        if (pageJsonContent.version === '1.0') {
+          console.warn(`Page ${pageFileStructure?.pageKey} has version 1.0 which is not supported anymore. Skipping...`);
+          continue;
+        }
         
         result.push({
           ...pageJsonContent,
@@ -136,7 +137,7 @@ export class FileReader {
    * @returns The page structure or null if the page does not exist
    */
   public getPageFileStructure(pageKey: string): PageFileStructure | null {
-    const dirPath = `app/pages/${pageKey}`;
+    const dirPath = this.isDevelopment ? `app/pages/${pageKey}` : `dist/server/pages/${pageKey}`;
     const absoluteDirPath = `${PROJECT_DIR}/${dirPath}`;
     
     const filePaths = this.getAllFilePathsInDirectory(absoluteDirPath);
@@ -212,5 +213,40 @@ export class FileReader {
     return fs.readdirSync(directory).filter((file) => {
       return fs.statSync(path.join(directory, file)).isDirectory();
     });
+  }
+
+  /**
+   * Check all pages for having index.jsx/tsx and api.server.js/ts files
+   */
+  // TODO: remove?
+  public checkFilesForPages(): {
+    pagesWithDefinedIndexJsxFile: string[];
+    pagesWithDefinedApiServerJsFile: string[];
+  } {
+    const pageDirectories = this.getPagesDirectories();
+    const pagesWithDefinedIndexJsxFile: string[] = [];
+    const pagesWithDefinedApiServerJsFile: string[] = [];
+
+    for (const pageKey of pageDirectories) {
+      const pageFileStructure = this.getPageFileStructure(pageKey);
+      if (!pageFileStructure) {
+        continue;
+      }
+
+      const hasIndexJsxFile = pageFileStructure.files?.some((f) => f.fileName === `index.${this.isDevelopment ? 'tsx' : 'jsx'}`);
+      if (hasIndexJsxFile) {
+        pagesWithDefinedIndexJsxFile.push(pageKey);
+      }
+
+      const hasApiServerJsFile = pageFileStructure.files?.some((f) => f.fileName === `api.server.${this.isDevelopment ? 'ts' : 'js'}`);
+      if (hasApiServerJsFile) {
+        pagesWithDefinedApiServerJsFile.push(pageKey);
+      }
+    }
+
+    return {
+      pagesWithDefinedIndexJsxFile,
+      pagesWithDefinedApiServerJsFile,
+    };
   }
 }

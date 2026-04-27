@@ -1,30 +1,29 @@
 import { defaultTablePageSize } from "../constants/table";
 import { RelationalDatabaseSchema, RelationalDatabaseSchemaTable } from "../models/databaseSchema.model";
-import { Relationship } from "../models/relationship.model";
 import { TablePageConfig, TablePageConfigColumn } from "../models/tablePage.model";
 import { findNameLikeColumns } from "./findNameLikeColumns";
-import { getAllPossibleRelationships } from "./getAllPossibleLinked";
+import { getAllPossibleRelationships } from "./getAllPossibleRelationships";
 import { getLabelFromForeignKeyColumnName } from "./getLabelFromForeignKeyColumnName";
-import { sortColumnsByPriority } from "./sortColumnsByPriority";
-import { sortRelationshipsByOrder } from "./sortRelationshipsByOrder";
 import { transformToReadable } from "./transformToReadable";
 
 interface ReturnTypeFinalData extends TablePageConfig {
-  // Columns
   selectableColumns: string[];
   searchableColumns: string[];
   sortableColumns: string[];
   filterableColumns: string[];
   hiddenColumns: string[];
-
-  // Relationships
-  hiddenRelationships: string[];
+  hiddenLinkedRecordsColumns: string[];
 }
+
 interface ReturnType {
   tableSchema?: RelationalDatabaseSchemaTable; 
   tablePageProcessedConfig: ReturnTypeFinalData;
 }
 
+/**
+ * Get the default column data for a given table and column name.
+ * This function uses the database schema to determine the default settings for the column.
+ */
 export function getDefaultColumnData(
   tableName: string, 
   columnName: string, 
@@ -44,7 +43,7 @@ export function getDefaultColumnData(
   const relationshipPreviewColumns = foreignTableSchema ? findNameLikeColumns(foreignTableSchema.columns) : [];
   
   return {
-    column: columnSchema.name,
+    column: columnName,
     label: columnSchema.foreignKey ? getLabelFromForeignKeyColumnName(columnSchema.name) : transformToReadable(columnSchema.name),
     hiddenInTable: false,
     hiddenInForm: columnSchema.primaryKey?.autoIncrement ? true : false,
@@ -55,28 +54,6 @@ export function getDefaultColumnData(
     fieldInput: columnSchema.fieldInput,
     fieldRequirement: columnSchema.nullable ? 'none' : 'notEmpty',
     formFieldSpan: '12',
-  };
-}
-
-export function removeDefaultColumnData(data: TablePageConfigColumn, defaultColumnData: TablePageConfigColumn): TablePageConfigColumn | undefined {
-  // If some data equal to defaultColumnData, remove it from finalData
-  const finalData: Partial<Omit<TablePageConfigColumn, 'column'>> = {};
-  
-  Object.entries(data).forEach(([key, value]) => {
-    if (key === 'column') return;
-    
-    const typedKey = key as keyof Omit<TablePageConfigColumn, 'column'>;
-    
-    if (value !== undefined && value !== defaultColumnData[typedKey]) {
-      finalData[typedKey] = value;
-    }
-  });
-
-  // If finalData is empty, return undefined
-  // Otherwise, return finalData with column name
-  return Object.keys(finalData).length === 0 ? undefined : {
-    ...finalData,
-    column: data.column,
   };
 }
 
@@ -93,7 +70,7 @@ export function getTableData(params: {
       sortableColumns: [],
       filterableColumns: [],
       hiddenColumns: [],
-      hiddenRelationships: [],
+      hiddenLinkedRecordsColumns: [],
     },
   };
 
@@ -135,13 +112,14 @@ export function getTableData(params: {
       prefix: column?.prefix ?? defaultColumnData.prefix,
       suffix: column?.suffix ?? defaultColumnData.suffix,
       position: column?.position ?? defaultColumnData.position,
+      formFieldPosition: column?.formFieldPosition ?? defaultColumnData.formFieldPosition,
       relationshipPreviewColumns: column?.relationshipPreviewColumns ?? defaultColumnData.relationshipPreviewColumns,
       fieldInput: column?.fieldInput ?? defaultColumnData.fieldInput,
       fieldRequirement: column?.fieldRequirement ?? defaultColumnData.fieldRequirement,
       formFieldSpan: column?.formFieldSpan ?? defaultColumnData.formFieldSpan,
     } as TablePageConfigColumn;
   }) : tablePageConfig.columns;
-  const sortedColumns = tableSchema ? sortColumnsByPriority(tableSchema.columns, columns) : tablePageConfig.columns;
+
   const selectableColumns = columns?.map(c => c.column) ?? [];
   const searchableColumns = columns?.filter(c => c.searchable).map(c => c.column) ?? [];
   const sortableColumns = columns?.filter(c => c.sortable).map(c => c.column) ?? [];
@@ -149,20 +127,25 @@ export function getTableData(params: {
   const hiddenColumns = columns?.filter(c => c.hiddenInTable).map(c => c.column) ?? [];
 
   // Relationships
-  const autoDetectedRelationships = (databaseSchema && getAllPossibleRelationships(tablePageConfig, databaseSchema)) ?? [];
-  const relationships = autoDetectedRelationships.map(i => {
-    const relationship = tablePageConfig?.relationships?.find(i2 => i2.key === i.key);
+  const relationships = (databaseSchema && getAllPossibleRelationships(tablePageConfig, databaseSchema)) ?? [];
+
+  // Linked-records columns
+  const linkedRecordsColumns = relationships ? relationships.filter(r => r.relation === 'oneToMany').map(r => {
+    const linkedRecordsColumn = tablePageConfig?.linkedRecordsColumns?.find(lrc => lrc.relationshipKey === r.key);
+    const defaultLinkedRecordsColumnData = {
+      relationshipKey: r.key,
+      label: r.relation === 'oneToOne' ? getLabelFromForeignKeyColumnName(r.foreignKeyColumn || '') : transformToReadable(r.targetTable || ''),
+      hiddenInTable: false,
+    };
 
     return {
-      ...i,
-      key: i.key,
-      hiddenInTable: relationship?.hiddenInTable ?? false,
-      position: relationship?.position ?? i.position,
-      label: relationship?.label,
-    } as Relationship;
-  });
-  const sortedRelationships = sortRelationshipsByOrder(relationships);
-  const hiddenRelationships = relationships?.filter(i => i.hiddenInTable).map(i => i.key) ?? [];
+      relationshipKey: r.key,
+      label: linkedRecordsColumn?.label ?? defaultLinkedRecordsColumnData.label,
+      hiddenInTable: linkedRecordsColumn?.hiddenInTable ?? defaultLinkedRecordsColumnData.hiddenInTable,
+      position: linkedRecordsColumn?.position ?? undefined,
+    };
+  }) : tablePageConfig.linkedRecordsColumns;
+  const hiddenLinkedRecordsColumns = linkedRecordsColumns?.filter(lrc => lrc.hiddenInTable).map(lrc => lrc.relationshipKey) ?? [];
 
   return {
     tableSchema,
@@ -173,30 +156,39 @@ export function getTableData(params: {
       table: tablePageConfig.table,
       primaryKeyColumn,
       
-      columns: sortedColumns,
+      columns,
       
-      calculatedColumns: tablePageConfig.calculatedColumns,
-
       selectableColumns,
       searchableColumns,
       sortableColumns,
       filterableColumns,
       hiddenColumns,
       
-      relationships: sortedRelationships,
-      hiddenRelationships,
+      calculatedColumns: tablePageConfig.calculatedColumns,
+
+      linkedRecordsColumns,
+      hiddenLinkedRecordsColumns,
+      
+      relationships,
   
       allowInsert,
-      allowedRoleIdsToInsert: tablePageConfig?.allowedRoleIdsToInsert,
+      allowedRolesToInsert: tablePageConfig.allowedRolesToInsert,
       allowUpdate,
-      allowedRoleIdsToUpdate: tablePageConfig?.allowedRoleIdsToUpdate,
+      allowedRolesToUpdate: tablePageConfig.allowedRolesToUpdate,
       allowDelete,
-      allowedRoleIdsToDelete: tablePageConfig?.allowedRoleIdsToDelete,
+      allowedRolesToDelete: tablePageConfig.allowedRolesToDelete,
 
       pageSize: tablePageConfig?.pageSize ?? defaultTablePageSize,
 
       defaultSortColumn: tablePageConfig?.defaultSortColumn ?? primaryKeyColumn,
       defaultSortDirection: tablePageConfig?.defaultSortDirection ?? 'desc',
+
+      views: tablePageConfig?.views || [],
+
+      // Deprecated values replaced by allowedRoles fields
+      allowedRoleIdsToInsert: tablePageConfig?.allowedRoleIdsToInsert,
+      allowedRoleIdsToUpdate: tablePageConfig?.allowedRoleIdsToUpdate,
+      allowedRoleIdsToDelete: tablePageConfig?.allowedRoleIdsToDelete,
     },
   };
 }

@@ -35,13 +35,15 @@ Your local Kottster app automatically extracts and stores database schema inform
 
 **How it works in development:**
 
-When you generate new pages during development mode, your local app includes this locally-stored schema information in the request to our platform (external API). This allows the page generator to create appropriate page structures and components that match your database design.
+In visual builder, you can use optional features that requires making requests to our platform (external API), such as generating SQL queries using AI or create pages using ready-to-use page templates. 
 
-This approach ensures that database schema information is only shared when you actively request page generation.
+When you use such features, your local app includes this locally-stored schema information in the request to Kottster API.
+
+This approach ensures that database schema information is only shared when you actively use features that require it. <span style="color: #099268;">**Your actual database credentials, connection details or stored data are not accessible by our platform or any external services.**</span>
 
 ### Complete control
 
-The content of these connection files can be modified according to your development needs. You have full control over:
+The content of these data source connection files in `app/_server/data-sources/` can be modified according to your development needs. You have full control over:
 
 - Connection parameters
 - Authentication details
@@ -52,11 +54,12 @@ The content of these connection files can be modified according to your developm
 
 ### Environment variables
 
-For production deployments, we strongly recommend moving connection details (credentials or connection strings) to environment variables. This approach provides additional security and makes it easier to manage different environments.
+For production deployments, we strongly recommend **moving connection details (credentials or connection strings) to environment variables**. This approach provides additional security and makes it easier to manage different environments.
 
 Here's an example data source configuration:
 
 ```javascript [app/_server/data-sources/postgres.js]
+import { getEnvOrThrow } from '@kottster/common';
 import { KnexPgAdapter } from '@kottster/server';
 import knex from 'knex';
 
@@ -64,7 +67,7 @@ const client = knex({
   client: 'pg',
   connection: process.env.NODE_ENV === 'development' // [!code highlight]
     ? 'postgresql://myuser:mypassword@localhost:5432/mydatabase' // [!code highlight]
-    : process.env.DB_CONNECTION, // [!code highlight]
+    : getEnvOrThrow('DB_CONNECTION'), // [!code highlight]
   searchPath: ['public'],
 });
 

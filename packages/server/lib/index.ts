@@ -1,11 +1,11 @@
 // Core
-export { KottsterApp, KottsterAppOptions } from './core/app';
-export { DataSourceRegistry } from './core/dataSourceRegistry';
+export { ExternalIdentityProvider, ExternalIdentityProviderInput, ExternalIdentityProviderOutput, ExternalIdentityProviderType } from './core/externalIdentityProvider';
 
 // Factories
 export { createApp } from './factories/createApp';
 export { createDataSource } from './factories/createDataSource';
 export { createServer } from './factories/createServer';
+export { createIdentityProvider } from './factories/createIdentityProvider';
 
 // Adapters
 export { KnexPg as KnexPgAdapter } from './adapters/knex/knexPg';
@@ -15,3 +15,7 @@ export { KnexTedious as KnexTediousAdapter } from './adapters/knex/knexTedious';
 
 // Services
 export { CachingService } from './services/caching.service';
+
+// Errors
+export { ProcedureError } from './errors/procedureError';
+export { ValidationError } from './errors/validationError';

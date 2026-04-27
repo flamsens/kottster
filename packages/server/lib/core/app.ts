@@ -1,39 +1,87 @@
-import * as jose from 'jose';
-import { ExtendAppContextFunction } from '../models/appContext.model';
+import { ExtendProcedureContextFunction, Procedure, ProcedureContext } from '../models/procedure.model';
 import { PROJECT_DIR } from '../constants/projectDir';
-import { AppSchema, checkTsUsage, DataSource, JWTTokenPayload, Stage, User, RpcActionBody, TablePageInputSelect, TablePageInputDelete, TablePageInputUpdate, TablePageInputInsert, isSchemaEmpty, schemaPlaceholder, ApiResponse, TablePageInputSelectSingle, Page, TablePageConfig, TablePageInputSelectUsingExecuteQuery, TablePageSelectResult, DashboardPageConfig, DashboardPageInputGetStatData, DashboardPageInputGetCardData, DashboardPageGetStatDataResult, DashboardPageGetCardDataResult } from '@kottster/common';
+import { AppSchema, checkTsUsage, DataSource, Stage, Page, TablePageConfig, DashboardPageConfig, DashboardPageGetStatDataResult, DashboardPageGetCardDataResult, checkUserForRoles, InternalApiSchema, PartialTablePageConfig, transformStringToTablePageNestedTableKey, PartialDashboardPageConfig, DashboardPageConfigStat, DashboardPageConfigCard, TablePageInitiateRecordsExportResult, normalizeAppBasePath, IdentityProviderUserWithRoles, RpcRequestBody, MainJsonSchema, readAppSchema } from '@kottster/common';
 import { DataSourceRegistry } from './dataSourceRegistry';
 import { ActionService } from '../services/action.service';
 import { DataSourceAdapter } from '../models/dataSourceAdapter.model';
-import { parse as parseCookie } from 'cookie';
 import { Request, Response, NextFunction } from 'express';
 import { createServer } from '../factories/createServer';
+import { IdentityProvider, PostAuthMiddleware } from './identityProvider';
+import { HttpError, UnauthorizedError } from '../errors/httpError';
+import { FileReader } from '../services/fileReader.service';
+import { Exporter } from '../services/exporter.service';
+import dayjs from 'dayjs';
+import type { Express } from 'express';
+import { ExternalIdentityProvider } from './externalIdentityProvider';
+import { storageService } from '../services/storage.service';
+import { VERSION } from '../version';
 
 type RequestHandler = (req: Request, res: Response, next: NextFunction) => void;
 
-type PostAuthMiddleware = (user: User, request: Request) => void | Promise<void>;
-
 export interface KottsterAppOptions {
+  /**
+   * The secret key used to sign JWT tokens
+   */
   secretKey?: string;
-  schema: AppSchema | Record<string, never>;
+
+  /**
+   * The Kottster API token for the appen.
+   * If not provided, some features that require server-side requests to Kottster API will not work (e.g. sql query generation, AI features, etc.)
+   */
+  kottsterApiToken?: string;
+
+  /**
+   * The identity provider configuration
+   */
+  identityProvider?: IdentityProvider | ExternalIdentityProvider;
 
   /** 
-   * Custom validation middleware
-   * @description This middleware will be called after the JWT token is validated. You can use it to perform additional checks or modify the request object.
+   * Custom validation middleware.
+   * This middleware will be called after the JWT token is validated. You can use it to perform additional checks or modify the request object.
    * @example https://kottster.app/docs/security/authentication#custom-validation-middleware 
    */
   postAuthMiddleware?: PostAuthMiddleware;
 
-  /** Enable read-only mode */
+  /**
+   * Activates the Professional license features.
+   */
+  professional?: Function;
+
+  /** 
+   * Enable read-only mode 
+   * @hidden
+   */
   __readOnlyMode?: boolean;
 
-  /** Custom token validation function */
+  /** 
+   * Custom token validation function 
+   * @hidden
+   */
   __ensureValidToken?: (request: Request) => Promise<EnsureValidTokenResponse>;
+
+  /**
+   * @deprecated Do not pass schema here anymore. The schema is now read from the kottster-app.json file automatically.
+   * @hidden
+   */
+  schema?: MainJsonSchema | Record<string, never>;
+
+  /**
+   * Allows developers to customize the Express app instance.
+   *
+   * Useful for:
+   *   • adding custom middleware
+   *   • modifying server settings
+   *   • enabling CORS, proxies, cookies
+   *   • registering additional routes
+   *
+   * @param app The Express application instance
+   */
+  configureExpressApp?: (app: Express) => void;
 }
 
 interface EnsureValidTokenResponse {
   isTokenValid: boolean;
-  user: User | null;
+  user: IdentityProviderUserWithRoles | null;
   invalidTokenErrorMessage?: string;
 }
 
@@ -42,37 +90,132 @@ interface EnsureValidTokenResponse {
  */
 export class KottsterApp {
   public readonly appId: string;
+
   private readonly secretKey: string;
+  private readonly kottsterApiToken?: string;
+
   public readonly usingTsc: boolean;
   public readonly readOnlyMode: boolean = false;
-  public readonly stage: Stage = process.env.NODE_ENV === Stage.development ? Stage.development : Stage.production;
-  public dataSources: DataSource[] = [];
+  public readonly stage: Stage = process.env.KOTTSTER_APP_STAGE === Stage.development ? Stage.development : Stage.production;
+  public readonly basePath: string = '/';
+  private dataSources: DataSource[] = [];
+
+  public license?: string;
+  public licenseActivationObj?: Record<string, any>;
+  public licenseData?: Record<string, any>;
+
+  public identityProvider?: IdentityProvider;
+  public externalIdentityProvider?: ExternalIdentityProvider;
+
+  public exporter: Exporter;
   public schema: AppSchema;
+  
   private customEnsureValidToken?: (request: Request) => Promise<EnsureValidTokenResponse>;
   private postAuthMiddleware?: PostAuthMiddleware;
-
-  /**
-   * Used to store the token cache
-   */
-  private tokenCache = new Map<string, { data: { user: User; appId: string }; expires: number }>();
   
-  public extendContext: ExtendAppContextFunction;
+  public configureExpressApp?: (app: Express) => void;
+
+  public loadedPageConfigs: Page[] = [];
+
+  public loadPageConfigs(): Page[] {
+    const isDevelopment = this.stage === Stage.development;
+    const fileReader = new FileReader(isDevelopment);
+    this.loadedPageConfigs = fileReader.getPageConfigs();
+
+    return this.loadedPageConfigs;
+  }
+
+  public extendProcedureContext: ExtendProcedureContextFunction;
+
+  public getServerPackageVersion() {
+    return VERSION;
+  }
+
+  public getSecretKey() {
+    return `${this.secretKey}`;
+  }
+
+  public getKottsterApiToken() {
+    return this.kottsterApiToken;
+  }
 
   constructor(options: KottsterAppOptions) {
-    this.appId = options.schema.id ?? '';
+    const appSchema = readAppSchema(PROJECT_DIR, this.stage === Stage.development);
+
+    this.appId = appSchema.main.id ?? '';
     this.secretKey = options.secretKey ?? '';
+    this.kottsterApiToken = options.kottsterApiToken;
     this.usingTsc = checkTsUsage(PROJECT_DIR);
-    this.schema = (!isSchemaEmpty(options.schema) ? options.schema : schemaPlaceholder) as AppSchema;
+    this.schema = appSchema;
     this.customEnsureValidToken = options.__ensureValidToken;
     this.postAuthMiddleware = options.postAuthMiddleware;
     this.readOnlyMode = options.__readOnlyMode ?? false;
+    this.configureExpressApp = options.configureExpressApp;
+    
+    // Set license
+    if (options.professional) {
+      const activationObj = options.professional?.(this);
+      this.licenseActivationObj = activationObj;
+      this.license = activationObj['license']; 
+      this.licenseData = activationObj['dl'](this.license);
+    }
+    
+    // Set base path
+    const basePath = appSchema.main.basePath;
+    if (basePath) {
+      this.basePath = normalizeAppBasePath(basePath);
+    }
+
+    // Set identity providers
+    if (!options.identityProvider) {
+      throw new Error('Your KottsterApp must be configured with an identity provider. See https://kottster.app/docs/upgrade-to-v3-2 for more details.');
+    };
+    if (options.identityProvider?.['external']) {
+      if (!this.licenseData?.['features']?.includes('sso')) {
+        throw new Error('Professional license is required to use external identity providers.');
+      }
+
+      this.externalIdentityProvider = options.identityProvider as ExternalIdentityProvider;
+    } else {
+      this.identityProvider = options.identityProvider as IdentityProvider;
+      this.identityProvider!.setApp(this);
+    }
+
+    // Set up exporter
+    this.exporter = new Exporter();
+  }
+
+  async initialize() {
+    await this.identityProvider?.initialize();
+
+    // Load license data
+    if (this.licenseActivationObj && this.stage === Stage.production) {
+      const res = await fetch('https://api.kottster.app/v3/apps/license/verify', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          license: this.license,
+        }),
+      });
+
+      if (!res.ok) {
+        throw new Error(`Invalid license`);
+      }
+
+      const data = await res.json();
+      if (JSON.stringify(data) !== JSON.stringify(this.licenseData)) {
+        throw new Error('Invalid license');
+      }      
+    }
   }
 
   /**
-   * Register data sources
+   * Load from a data source registry
    * @param registry The data source registry
    */
-  public registerDataSources(registry: DataSourceRegistry<{}>) {
+  public loadFromDataSourceRegistry(registry: DataSourceRegistry<{}>) {
     this.dataSources = Object.values(registry.dataSources);
 
     this.dataSources.forEach(dataSource => {
@@ -91,12 +234,12 @@ export class KottsterApp {
    * Register a context middleware
    * @param fn The function to extend the context
    */
-  public registerContextMiddleware(fn: ExtendAppContextFunction) {
-    this.extendContext = fn;
+  public registerContextMiddleware(fn: ExtendProcedureContextFunction) {
+    this.extendProcedureContext = fn;
   }
 
-  public async executeAction(action: string, data: any) {
-    return await ActionService.getAction(this, action).execute(data);
+  public async executeAction(action: string, data: any, user?: IdentityProviderUserWithRoles, req?: Request): Promise<any> {
+    return await ActionService.getAction(this, action).executeWithCheckings(data, user, req);
   }
 
   /**
@@ -110,10 +253,10 @@ export class KottsterApp {
         next();
         return;
       }
-  
+
       try {
         const result = await this.handleInternalApiRequest(req);
-        
+
         if (result) {
           res.setHeader('Content-Type', 'application/json');
           res.status(200).json(result);
@@ -123,45 +266,188 @@ export class KottsterApp {
           return;
         }
       } catch (error) {
-        console.error('Error handling internal API request:', error);
+        if (error instanceof HttpError) {
+          res.status(error.statusCode).json({
+            status: 'error',
+            statusCode: error.statusCode,
+            message: error.message
+          });
+          return;
+        }
+
+        console.error('Internal API error:', error);
         res.status(500).json({ error: 'Internal Server Error' });
         return;
       }
     }
   }
 
-  private async handleInternalApiRequest(request: Request): Promise<any> {
-    let result: ApiResponse;
-    
-    try {
-      const { isTokenValid, invalidTokenErrorMessage } = await this.ensureValidToken(request);
+  public getIdpRoute() {
+    return async (req: Request, res: Response) => {
+      try {
+        if (!this.externalIdentityProvider) {
+          res.status(400).json({ error: 'No connected identity provider configured' });
+          return;
+        }
 
-      const action = request.query.action as string | undefined;
-      const actionData = request.body;
-      
-      // If the action is 'getAppSchema', we don't need to throw an error for invalid token
-      if (!isTokenValid && action !== 'getAppSchema' && action !== 'initApp') {
-        throw new Error(`Invalid JWT token: ${invalidTokenErrorMessage}`);
+        if (req.method !== 'GET') {
+          res.status(405).json({ error: 'Method Not Allowed' });
+          return;
+        }
+
+        const type = req.params.type;
+        if (!type) {
+          res.status(400).json({ error: 'Bad Request' });
+          return;
+        }
+
+        switch (type) {
+          case 'callback': {
+            const searchParamsStr = req.url.split('?')[1] || '';
+            const searchParams = new URLSearchParams(searchParamsStr);
+            const code = searchParams.get('code') || '';
+            const stateSearchParam = searchParams.get('state') || '';
+            if (!code) {
+              res.status(400).json({ error: 'Bad Request: code is required' });
+              return;
+            }
+
+            const { accessToken } = await this.externalIdentityProvider.exchangeCodeForToken({
+              code,
+              stateSearchParam,
+            });
+            const storageKey = storageService.save(accessToken);
+            const url = `${this.basePath}auth?storageKeyForAccessToken=${storageKey}`;
+
+            res.redirect(url);
+            return;
+          };
+          case 'login': {
+            const redirectUri = req.query.redirectUri as string || '';
+            if (!redirectUri) {
+              res.status(400).json({ error: 'Bad Request: redirectUri is required' });
+              return;
+            }
+
+            const { redirectUri: finalUrl } = await this.externalIdentityProvider.getLoginUrl({
+              redirectUri,
+            });
+
+            res.redirect(finalUrl);
+            return;
+          }
+          default: {
+            res.status(404).json({ error: 'Not Found' });
+            return;
+          }
+        }
+      } catch (error) {
+        console.error('IdP route error:', error);
+        if (!res.headersSent) {
+          res.status(500).json({ error: 'IdP route failed' });
+        }
       }
+    };
+  }
+
+  public getDownloadRoute() {
+    return async (req: Request, res: Response) => {
+      try {
+        if (req.method !== 'GET') {
+          res.status(405).json({ error: 'Method Not Allowed' });
+          return;
+        }
+
+        const operationId = req.params.operationId;
+        if (!operationId) {
+          res.status(400).json({ error: 'Bad Request' });
+          return;
+        }
+
+        const operation = this.exporter.getOperation(operationId);
+        const dataSource = this.dataSources.find(ds => ds.name === operation?.dataSourceName);
+        if (!operation || !dataSource) {
+          res.status(404).json({ error: 'Not Found' });
+          return;
+        }
+
+        const dataSourceAdapter = dataSource.adapter as DataSourceAdapter | undefined;
+        if (!dataSourceAdapter) {
+          throw new Error(`Data source adapter for "${dataSource.name}" not found`);
+        }
+
+        const stream = await dataSourceAdapter.getTableRecordsStream(
+          ...operation.parameters
+        );
+
+        const filename = `export-${dayjs().format('YYYY-MM-DD-HH-mm-ss')}-${operationId}`;
+        const headers = this.exporter.getHeadersByFormat(operation.format, filename);
+        Object.entries(headers).forEach(([key, value]) => {
+          res.setHeader(key, value);
+        });
+
+        switch (operation.format) {
+          case 'json': {
+            this.exporter.convertToJSON(stream, res);
+            break;
+          };
+          case 'csv': {
+            this.exporter.convertToCSV(stream, res);
+            break;
+          }
+          case 'xlsx': {
+            this.exporter.convertToXLSX(stream, res);
+            break;
+          }
+          default: {
+            throw new Error('Unsupported export format');
+          }
+        };
+      } catch (error) {
+        console.error('Export route error:', error);
+        if (!res.headersSent) {
+          res.status(500).json({ error: 'Export failed' });
+        }
+      }
+    };
+  }
+
+  private async handleInternalApiRequest(request: Request): Promise<{
+    status: 'success' | 'error';
+    result?: any;
+    error?: string;
+  }> {
+    try {
+      const { isTokenValid, invalidTokenErrorMessage, user } = await this.ensureValidToken(request);
+
+      const action = request.query.action as keyof InternalApiSchema | undefined;
+      const actionData = request.body;
 
       if (!action) {
         throw new Error('Action not found in request');
       }
-  
-      result = {
+
+      if (!isTokenValid && action && !(['getApp', 'initApp', 'login', 'getStorageValue'] as (keyof InternalApiSchema)[]).includes(action)) {
+        throw new UnauthorizedError(`Invalid JWT token: ${invalidTokenErrorMessage}`);
+      }
+
+      return {
         status: 'success',
-        result: await this.executeAction(action, actionData),
+        result: await this.executeAction(action, actionData, user ?? undefined, request),
       };
     } catch (error) {
-      console.error('Error handling Kottster API request:', error);
-      
-      result = {
+      // If the error is an instance of HttpError, we can rethrow it
+      if (error instanceof HttpError) {
+        throw error;
+      }
+
+      console.error('Kottster API error:', error);
+
+      return {
         status: 'error',
         error: error.message,
       };
     }
-
-    return result;
   }
 
   /**
@@ -169,22 +455,31 @@ export class KottsterApp {
    * @param procedures The procedures
    * @returns The express request handler
    */
-  public defineCustomController<T extends Record<string, (input: any) => any>>(
+  public defineCustomController<T extends Record<string, Procedure>>(
     procedures: T
   ): RequestHandler & { procedures: T } {
     const func: RequestHandler = async (req, res) => {
-      const { isTokenValid, invalidTokenErrorMessage } = await this.ensureValidToken(req);
-      if (!isTokenValid) {
+      const { isTokenValid, user, invalidTokenErrorMessage } = await this.ensureValidToken(req);
+      if (!isTokenValid || !user) {
         res.status(401).json({ error: `Invalid JWT token: ${invalidTokenErrorMessage}` });
         return;
       }
 
-      const body = await req.body as RpcActionBody<'custom'>;
-      const { procedure, procedureInput } = body.input;
+      const { action, input } = await req.body as RpcRequestBody;
+      if (action !== 'custom') {
+        res.status(400).json({ error: 'Invalid action for custom controller' });
+        return;
+      }
+
+      const { procedure, procedureInput } = input;
+      const ctx: ProcedureContext = {
+        user,
+        req,
+      };
 
       if (procedure in procedures) {
         try {
-          const result = await procedures[procedure](procedureInput);
+          const result = await procedures[procedure](procedureInput, ctx);
           res.json({
             status: 'success',
             result,
@@ -215,7 +510,7 @@ export class KottsterApp {
    * @param dashboardPageConfig The dashboard page config
    * @returns The express request handler
    */
-  public defineDashboardController(dashboardPageConfig: DashboardPageConfig) {
+  public defineDashboardController(partialDashboardPageConfig: PartialDashboardPageConfig) {
     const func: RequestHandler = async (req, res) => {
       const { isTokenValid, user, invalidTokenErrorMessage } = await this.ensureValidToken(req);
       if (!isTokenValid || !user) {
@@ -224,22 +519,51 @@ export class KottsterApp {
       }
 
       const page = (req as Request & { page?: Page }).page;
-      if (!page) {
+      if (!page || page.type !== 'dashboard') {
         res.status(404).json({ error: 'Specified page not found' });
         return;
       }
 
+      // Merge the partial config with the page config
+      const dashboardPageConfig: DashboardPageConfig = {
+        ...page.config,
+        ...partialDashboardPageConfig as Partial<DashboardPageConfig>,
+        stats: [
+          ...(page.config.stats ?? []),
+          ...(partialDashboardPageConfig.stats ?? [])
+        ].reduce((acc, stat) => {
+          const existingIndex = acc.findIndex(s => s.key === stat.key);
+          if (existingIndex >= 0) {
+            acc[existingIndex] = { ...acc[existingIndex], ...stat } as DashboardPageConfigStat;
+          } else {
+            acc.push(stat as DashboardPageConfigStat);
+          }
+          return acc;
+        }, [] as NonNullable<DashboardPageConfig['stats']>),
+        cards: [
+          ...(page.config.cards ?? []),
+          ...(partialDashboardPageConfig.cards ?? [])
+        ].reduce((acc, card) => {
+          const existingIndex = acc.findIndex(c => c.key === card.key);
+          if (existingIndex >= 0) {
+            acc[existingIndex] = { ...acc[existingIndex], ...card } as DashboardPageConfigCard;
+          } else {
+            acc.push(card as DashboardPageConfigCard);
+          }
+          return acc;
+        }, [] as NonNullable<DashboardPageConfig['cards']>)
+      };
+
       try {
-        const body = await req.body as RpcActionBody<'dashboard_getCardData' | 'dashboard_getStatData'>;
-        let result: any;
+        const { action, input } = await req.body as RpcRequestBody;
+        let result: unknown;
 
         try {
-          if (page.allowedRoleIds?.length && !page.allowedRoleIds.includes(user.role.id) && this.stage === Stage.production) {
+          if (this.stage === Stage.production && !checkUserForRoles(user.id, user.roles, page.allowedRoles, page.allowedRoleIds)) {
             throw new Error('You do not have access to this page');
           }
 
-          if (body.action === 'dashboard_getStatData') {
-            const input = body.input as DashboardPageInputGetStatData;
+          if (action === 'dashboard_getStatData') {
             const stat = dashboardPageConfig.stats?.find(s => s.key === input.statKey);
             if (!stat) {
               res.status(404).json({ error: `Specified stat "${input.statKey}" not found` });
@@ -250,7 +574,7 @@ export class KottsterApp {
               if (!stat.dataSource) {
                 throw new Error(`Data source for stat not specified`);
               }
-  
+
               const dataSource = this.dataSources.find(ds => ds.name === stat.dataSource);
               if (!dataSource) {
                 throw new Error(`Data source "${stat.dataSource}" not found`);
@@ -275,8 +599,7 @@ export class KottsterApp {
               }
             }
           }
-          else if (body.action === 'dashboard_getCardData') {
-            const input = body.input as DashboardPageInputGetCardData;
+          else if (action === 'dashboard_getCardData') {
             const card = dashboardPageConfig.cards?.find(c => c.key === input.cardKey);
             if (!card) {
               res.status(404).json({ error: `Specified card "${input.cardKey}" not found` });
@@ -287,7 +610,7 @@ export class KottsterApp {
               if (!card.dataSource) {
                 throw new Error(`Data source for card not specified`);
               }
-  
+
               const dataSource = this.dataSources.find(ds => ds.name === card.dataSource);
               if (!dataSource) {
                 throw new Error(`Data source "${card.dataSource}" not found`);
@@ -314,7 +637,7 @@ export class KottsterApp {
         } catch (error) {
           throw new Error(error);
         }
-        
+
         res.json({
           status: 'success',
           result,
@@ -342,20 +665,11 @@ export class KottsterApp {
    * @param pageSettings The page settings
    * @returns The express request handler
    */
-  public defineTableController<T extends Record<string, (input: any) => any>>(
-    tablePageConfig: TablePageConfig,
+  public defineTableController<T extends Record<string, Procedure>>(
+    partialTablePageConfig: PartialTablePageConfig,
     procedures?: T
-  ): RequestHandler  & { procedures: T } {
-    // Check if specified data source exists
-    const dataSource = this.dataSources.find(ds => ds.name === tablePageConfig.dataSource);
-    if (!dataSource && (tablePageConfig.fetchStrategy === 'databaseTable' || tablePageConfig.fetchStrategy === 'rawSqlQuery')) {
-      throw new Error(`Data source "${tablePageConfig.dataSource}" not found`);
-    }
-
+  ): RequestHandler & { procedures: T } {
     const func: RequestHandler = async (req, res, next) => {
-      const body = await req.body as RpcActionBody<'custom'>;
-      const action = body.action;
-
       const { isTokenValid, user, invalidTokenErrorMessage } = await this.ensureValidToken(req);
       if (!isTokenValid || !user) {
         res.status(401).json({ error: `Invalid JWT token: ${invalidTokenErrorMessage}` });
@@ -363,33 +677,61 @@ export class KottsterApp {
       }
 
       const page = (req as Request & { page?: Page }).page;
-      if (!page) {
+      if (!page || page.type !== 'table') {
         res.status(404).json({ error: 'Specified page not found' });
         return;
       }
 
-      // If the request is a custom one, handle it by the custom controller
-      if (action === 'custom') {
-        return this.defineCustomController(procedures as T)(req, res, next);
-      }
+      // Merge the partial config with the page config
+      const tablePageConfig: TablePageConfig = {
+        ...page.config,
+        ...partialTablePageConfig as Partial<TablePageConfig>,
+        nested: {
+          ...page.config.nested,
+          ...Object.keys(partialTablePageConfig.nested || {}).reduce((acc, key) => {
+            const tablePageNestedTableKey = transformStringToTablePageNestedTableKey(key);
+            acc[key] = {
+              // We need to pass these required properties for nested table config
+              table: tablePageNestedTableKey[tablePageNestedTableKey.length - 1]?.table,
+              fetchStrategy: 'databaseTable',
+
+              ...page.config.nested?.[key],
+              ...partialTablePageConfig.nested?.[key] as Partial<TablePageConfig>,
+            };
+            return acc;
+          }, {} as Record<string, TablePageConfig>)
+        }
+      };
+
 
       try {
-        const body = await req.body as RpcActionBody<'table_select' | 'table_selectOne' | 'table_insert' | 'table_update' | 'table_delete'>;
-        let result: any;
+        // Check if specified data source exists
+        const dataSource = this.dataSources.find(ds => ds.name === tablePageConfig.dataSource);
+        if (!dataSource && (tablePageConfig.fetchStrategy === 'databaseTable' || tablePageConfig.fetchStrategy === 'rawSqlQuery')) {
+          throw new Error(`Data source "${tablePageConfig.dataSource}" not found`);
+        }
+
+        const { action, input } = await req.body as RpcRequestBody;
+        let result: unknown;
+
+        // If the request is a custom one, handle it by the custom controller
+        if (action === 'custom') {
+          return this.defineCustomController(procedures as T)(req, res, next);
+        }
 
         try {
           const dataSourceAdapter = dataSource?.adapter as DataSourceAdapter | undefined;
           const databaseSchema = dataSourceAdapter ? await dataSourceAdapter.getDatabaseSchema() : undefined;
 
-          if (page.allowedRoleIds?.length && !page.allowedRoleIds.includes(user.role.id) && this.stage === Stage.production) {
+          if (this.stage === Stage.production && !checkUserForRoles(user.id, user.roles, page.allowedRoles, page.allowedRoleIds)) {
             throw new Error('You do not have access to this page');
           }
-          
+
           // If the table select action is used and fetch strategy is 'customFetch', we need to execute the custom query right away
-          if (body.action === 'table_select' && tablePageConfig.fetchStrategy === 'customFetch') {
-            result = tablePageConfig.customDataFetcher ? await tablePageConfig.customDataFetcher(body.input as TablePageInputSelectUsingExecuteQuery) : {
+          if (action === 'table_getRecords' && tablePageConfig.fetchStrategy === 'customFetch') {
+            result = tablePageConfig.customDataFetcher ? await tablePageConfig.customDataFetcher(input) : {
               records: [],
-            } as TablePageSelectResult;
+            };
           } else {
             if (!dataSource) {
               throw new Error(`Data source "${tablePageConfig.dataSource}" not found`);
@@ -400,35 +742,46 @@ export class KottsterApp {
             if (!databaseSchema) {
               throw new Error(`Database schema for "${tablePageConfig.dataSource}" not found`);
             }
-            
-            if (body.action === 'table_select') {
-              result = await dataSourceAdapter?.getTableRecords(body.input as TablePageInputSelect, databaseSchema, tablePageConfig);
-            } else if (body.action === 'table_selectOne') {
-              result = await dataSourceAdapter.getOneTableRecord(body.input as TablePageInputSelectSingle, databaseSchema, tablePageConfig);
-            } else if (body.action === 'table_insert') {
-              if (tablePageConfig.allowedRoleIdsToInsert?.length && this.stage === Stage.production && !tablePageConfig.allowedRoleIdsToInsert.includes(user.role.id)) {
+
+            if (action === 'table_getRecords') {
+              result = await dataSourceAdapter?.getTableRecords(tablePageConfig, input, databaseSchema);
+            } else if (action === 'table_initiateRecordsExport') {
+              const operationId = this.exporter.createOperation({
+                parameters: [
+                  tablePageConfig, input, databaseSchema,
+                ],
+                dataSourceName: dataSource.name,
+                format: input.format,
+              });
+              result = {
+                operationId
+              } as TablePageInitiateRecordsExportResult;
+            } else if (action === 'table_getRecord') {
+              result = await dataSourceAdapter.getOneTableRecord(tablePageConfig, input, databaseSchema);
+            } else if (action === 'table_createRecord') {
+              if (this.stage === Stage.production && !checkUserForRoles(user.id, user.roles, tablePageConfig.allowedRolesToInsert, tablePageConfig.allowedRoleIdsToInsert)) {
                 throw new Error('You do not have permission to create records in this table');
               }
 
-              result = await dataSourceAdapter.insertTableRecord(body.input as TablePageInputInsert, databaseSchema, tablePageConfig);
-            } else if (body.action === 'table_update') {
-              if (tablePageConfig.allowedRoleIdsToUpdate?.length && this.stage === Stage.production && !tablePageConfig.allowedRoleIdsToUpdate.includes(user.role.id)) {
+              result = await dataSourceAdapter.insertTableRecord(tablePageConfig, input, databaseSchema);
+            } else if (action === 'table_updateRecord') {
+              if (this.stage === Stage.production && !checkUserForRoles(user.id, user.roles, tablePageConfig.allowedRolesToUpdate, tablePageConfig.allowedRoleIdsToUpdate)) {
                 throw new Error('You do not have permission to update records in this table');
               }
 
-              result = await dataSourceAdapter.updateTableRecords(body.input as TablePageInputUpdate, databaseSchema, tablePageConfig);
-            } else if (body.action === 'table_delete') {
-              if (tablePageConfig.allowedRoleIdsToDelete?.length && this.stage === Stage.production && !tablePageConfig.allowedRoleIdsToDelete.includes(user.role.id)) {
+              result = await dataSourceAdapter.updateTableRecords(tablePageConfig, input, databaseSchema);
+            } else if (action === 'table_deleteRecord') {
+              if (this.stage === Stage.production && !checkUserForRoles(user.id, user.roles, tablePageConfig.allowedRolesToDelete, tablePageConfig.allowedRoleIdsToDelete)) {
                 throw new Error('You do not have permission to delete records in this table');
               }
 
-              result = await dataSourceAdapter.deleteTableRecords(body.input as TablePageInputDelete, databaseSchema, tablePageConfig);
-            }
+              result = await dataSourceAdapter.deleteTableRecords(tablePageConfig, input, databaseSchema);
+            };
           };
         } catch (error) {
           throw new Error(error);
         }
-        
+
         res.json({
           status: 'success',
           result,
@@ -453,118 +806,58 @@ export class KottsterApp {
     return func as RequestHandler & { procedures: T };
   };
 
-  private cleanupExpiredTokenCache(): void {
-    const now = Date.now();
-    for (const [token, cached] of this.tokenCache.entries()) {
-      if (cached.expires <= now) {
-        this.tokenCache.delete(token);
-      }
-    }
-  };
-
-  private async getDataFromToken(token: string): Promise<{ user: User; appId: string }> {
-    // Check cache and return cached data if available
-    const cached = this.tokenCache.get(token);
-    if (cached && cached.expires > Date.now()) {
-      return cached.data;
-    }
-
-    const { payload } = await jose.jwtVerify(token, new TextEncoder().encode(this.secretKey));
-    const decodedToken = payload as unknown as JWTTokenPayload;
-    if (!decodedToken.appId || decodedToken.appId !== this.appId || !decodedToken.userId) {
-      throw new Error('Invalid JWT token');
-    }
-
-    const response = await fetch(`${process.env.KOTTSTER_API_BASE_URL || 'https://api.kottster.app'}/v3/apps/${this.appId}/users/current`, {
-      method: 'GET',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-      },
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to fetch user data by JWT token: ${response.statusText}`);
-    };
-    const user = await response.json() as User;
-    const result = { 
-      appId: decodedToken.appId,
-      user 
-    };
-
-    // Cache result
-    this.tokenCache.set(token, {
-      data: result,
-      expires: Date.now() + 60 * 1000 // 60s
-    });
-    this.cleanupExpiredTokenCache();
-  
-    return result;
-  }
-
-  public createRequestWithPageDataMiddleware(pageConfig: Page): RequestHandler {
-    const handler: RequestHandler = (req, res, next) => {
-      (req as Request & { page?: Page }).page = pageConfig;
-
-      next();
-    };
-
-    return handler;
-  }
-
   private async ensureValidToken(request: Request): Promise<EnsureValidTokenResponse> {
-    // If a custom token validation function is provided, use it
-    if (this.customEnsureValidToken) {
-      return this.customEnsureValidToken(request);
-    }
-
-    let token = request.get('authorization')?.replace('Bearer ', '');
-    if (!token) {
-      const cookieHeader = request.get('Cookie');
-      const cookieData = parseCookie(cookieHeader ?? '');
-      token = cookieData.jwtToken;
-    }
-    if (!token) {
-      return { 
-        isTokenValid: false, 
-        user: null,
-        invalidTokenErrorMessage: 'Invalid JWT token: token not passed' 
-      };
-    }
-
-    if (!this.secretKey) {
-      return { 
-        isTokenValid: false, 
-        user: null,
-        invalidTokenErrorMessage: 'Invalid JWT token: secret key not set' 
-      };
-    }
-
     try {
-      const { user, appId } = await this.getDataFromToken(token);
-      if (String(appId) !== String(this.appId)) {
-        throw new Error('Invalid JWT token: invalid app ID');
+      // If a custom token validation function is provided, use it
+      if (this.customEnsureValidToken) {
+        return this.customEnsureValidToken(request);
       }
 
-      // If a post-auth middleware is provided, call it
-      if (this.postAuthMiddleware) {
-        await this.postAuthMiddleware(user, request);
+      const token = request.get('authorization')?.replace('Bearer ', '');
+      if (!token) {
+        return {
+          isTokenValid: false,
+          user: null,
+          invalidTokenErrorMessage: 'Invalid JWT token: token not passed'
+        };
       }
       
-      return { 
-        isTokenValid: true, 
-        user,
-      };
+      if (this.externalIdentityProvider) {
+        const { user } = await this.externalIdentityProvider.getUserData({ accessToken: token });
+
+        return {
+          isTokenValid: true,
+          user,
+        };
+      } else if (this.identityProvider) {
+        const user = await this.identityProvider.verifyTokenAndGetUser(token);
+        const userRoles = await this.identityProvider.getUserRoles(user.id);
+        const extendedUser: IdentityProviderUserWithRoles = {
+          ...user,
+          roles: userRoles,
+        };
+
+        // If a post-auth middleware is provided, call it
+        if (this.postAuthMiddleware) {
+          await this.postAuthMiddleware(extendedUser, request);
+        }
+
+        return {
+          isTokenValid: true,
+          user: extendedUser,
+        };
+      } else {
+        throw new Error('No identity provider configured for the app');
+      }
     } catch (error) {
-      return { 
-        isTokenValid: false, 
-        user: null, 
-        invalidTokenErrorMessage: error.message 
+      return {
+        isTokenValid: false,
+        user: null,
+        invalidTokenErrorMessage: error.message
       };
     }
   }
 
-  /**
-   * Get the registered data sources
-   */
   public getDataSources() {
     return this.dataSources;
   }

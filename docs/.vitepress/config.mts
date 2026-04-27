@@ -4,6 +4,7 @@ import {
   groupIconVitePlugin,
   localIconLoader
 } from 'vitepress-plugin-group-icons';
+import { tabsMarkdownPlugin } from 'vitepress-plugin-tabs'
 
 // https://vitepress.dev/reference/site-config
 export default defineConfig({
@@ -29,6 +30,7 @@ export default defineConfig({
     
     nav: [
       { text: 'Docs', link: '/' },
+      { text: 'API Reference', link: 'https://kottster.app/api-reference/index.html' },
       // TODO: Uncomment when sidebar is fixed
       // { text: 'UI Library', link: '/ui/' },
       { text: 'Website', link: 'https://kottster.app/' },
@@ -37,6 +39,15 @@ export default defineConfig({
 
     // TODO: Remove this when sidebar is fixed
     sidebar: sidebarDocs(),
+    // sidebar: [
+    //   { base: '', items: sidebarDocs() },
+    //   {
+    //     base: '/api/',
+    //     text: 'API',
+    //     items: serverTypedocSidebar,
+    //   },
+    //   // '/ui/': { base: '/ui/', items: sidebarUILibrary() }
+    // ],
 
     // TODO: Uncomment
     // sidebar: [
@@ -45,7 +56,8 @@ export default defineConfig({
     // ],
 
     socialLinks: [
-      { icon: 'github', link: 'https://github.com/kottster/kottster' }
+      { icon: 'github', link: 'https://github.com/kottster/kottster' },
+      { icon: 'discord', link: 'https://kottster.app/discord' },
     ]
   },
   
@@ -53,13 +65,8 @@ export default defineConfig({
     [
       'script',
       {
-        src: '/docs/js/aaib.js',
-      }
-    ],
-    [
-      'script',
-      {
-        src: 'https://unpkg.com/@aaib/javascript/dist/loader-v1.js',
+        src: '/docs/js/discord.js',
+        defer: 'true'
       }
     ],
     [
@@ -111,8 +118,6 @@ export default defineConfig({
     ],
   ],
 
-  
-
   sitemap: {
     hostname: 'https://kottster.app',
   },
@@ -120,6 +125,7 @@ export default defineConfig({
   markdown: {
     config(md) {
       md.use(groupIconMdPlugin)
+      md.use(tabsMarkdownPlugin)
     },
   },
 
@@ -130,15 +136,7 @@ export default defineConfig({
       }
     },
     plugins: [
-      groupIconVitePlugin({
-        // customIcon: {
-        //   vitepress: localIconLoader(
-        //     import.meta.url,
-        //     '../public/vitepress-logo-mini.svg'
-        //   ),
-        //   firebase: 'logos:firebase'
-        // }
-      }),
+      groupIconVitePlugin({}),
     ]
   },
 })
@@ -164,10 +162,11 @@ function sidebarDocs(): DefaultTheme.SidebarItem[] {
       text: 'App Configuration',
       collapsed: true,
       items: [
-        { text: 'Brending', link: '/app-configuration/brendning' },
-        { text: 'Sidebar', link: '/app-configuration/sidebar' },
+        { text: 'Overview', link: '/app-configuration/overview' },
+        { text: 'Identity provider', link: '/app-configuration/identity-provider' },
         { text: 'Data sources', link: '/data-sources' },
-        { text: 'Authentication', link: '/security/authentication' },
+        { text: 'Branding', link: '/app-configuration/branding' },
+        { text: 'Sidebar', link: '/app-configuration/sidebar' },
       ]
     },
 
@@ -177,7 +176,6 @@ function sidebarDocs(): DefaultTheme.SidebarItem[] {
       items: [
         { text: 'Roles and permissions', link: '/security/roles-and-permissions' },
         { text: 'Access to database', link: '/security/database-access' },
-        { text: 'Authentication', link: '/security/authentication' },
         { text: 'Database usage', link: '/security/database-usage' },
       ]
     },
@@ -190,24 +188,25 @@ function sidebarDocs(): DefaultTheme.SidebarItem[] {
           text: 'Configuration', 
           link: '/table/configuration/api',
           items: [
-            { text: 'API Reference', link: '/table/configuration/api' },    
+            { text: 'Configuration options', link: '/table/configuration/api' },
             { text: 'Raw SQL queries', link: '/table/configuration/raw-sql-queries' },
             { text: 'Custom data fetcher', link: '/table/configuration/custom-data-fetcher' },
             { text: 'Calculated columns', link: '/table/configuration/calculated-columns' },
-            { text: 'Relationships', link: '/table/configuration/relationships' },    
+            // { text: 'Relationships', link: '/table/configuration/relationships' },    
           ],
         },
         { text: 'TablePage component', link: '/ui/table-page-component' },
         { 
           text: 'Customization', 
-          link: '/table/customization/add-custom-columns',
+          link: '/table/customization/custom-columns',
           items: [
-            { text: 'Add custom columns', link: '/table/customization/add-custom-columns' },    
-            { text: 'Customize columns', link: '/table/customization/customize-columns' },    
-            { text: 'Add custom fields', link: '/table/customization/add-custom-fields' },    
-            { text: 'Customize fields', link: '/table/customization/customize-fields' },      
-            { text: 'Add actions', link: '/table/customization/add-custom-actions' },    
-            { text: 'Add bulk actions', link: '/table/customization/add-custom-bulk-actions' },    
+            { text: 'Custom columns', link: '/table/customization/custom-columns' },    
+            // { text: 'Customize columns', link: '/table/customization/customize-columns' },    
+            { text: 'Custom fields', link: '/table/customization/custom-fields' },    
+            // { text: 'Customize fields', link: '/table/customization/customize-fields' },      
+            { text: 'Custom actions', link: '/table/customization/custom-actions' },    
+            { text: 'Custom bulk actions', link: '/table/customization/custom-bulk-actions' },    
+            { text: 'Custom validation', link: '/table/customization/custom-validation' },
           ],
         },
       ]
@@ -222,7 +221,7 @@ function sidebarDocs(): DefaultTheme.SidebarItem[] {
           text: 'Configuration', 
           link: '/dashboard/configuration/api',
           items: [
-            { text: 'API Reference', link: '/dashboard/configuration/api' },    
+            { text: 'Configuration options', link: '/dashboard/configuration/api' },    
             { text: 'Raw SQL queries', link: '/dashboard/configuration/raw-sql-queries' },
             { text: 'Custom data fetcher', link: '/dashboard/configuration/custom-data-fetcher' },
           ],
@@ -235,14 +234,14 @@ function sidebarDocs(): DefaultTheme.SidebarItem[] {
       collapsed: false,
       items: [
         { text: 'Introduction', link: '/custom-pages/introduction' },
-        { text: 'Server API', link: '/custom-pages/api' },
+        { text: 'Building server API', link: '/custom-pages/api' },
         { text: 'Calling API', link: '/custom-pages/calling-api' },
       ]
     },
     // TODO: Remove this section when sidebar is fixed
     {
       text: 'UI Library',
-      collapsed: true,
+      collapsed: false,
       items: [
         { text: 'Overview', link: '/ui/overview' },
         {
@@ -252,6 +251,7 @@ function sidebarDocs(): DefaultTheme.SidebarItem[] {
             { text: 'TablePage', link: '/ui/table-page-component' },
             { text: 'DashboardPage', link: '/ui/dashboard-page-component' },
             { text: 'Page', link: '/ui/page-component' },
+            { text: 'Modal', link: '/ui/modal-component' },
           ]
         },
         {
@@ -260,6 +260,11 @@ function sidebarDocs(): DefaultTheme.SidebarItem[] {
           items: [
             { text: 'usePage', link: '/ui/use-page-hook' },
             { text: 'useCallProcedure', link: '/ui/use-call-procedure-hook' },
+            { text: 'useUser', link: '/ui/use-user-hook' },
+            { text: 'useApp', link: '/ui/use-app-hook' },
+            { text: 'useModal', link: '/ui/use-modal-hook' },
+            { text: 'useTable', link: '/ui/use-table-hook' },
+            { text: 'useTheme', link: '/ui/use-theme-hook' },
           ]
         },
       ]

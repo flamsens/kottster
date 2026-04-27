@@ -1,55 +1,30 @@
-import { stripIndent } from "@kottster/common";
+import { stripIndent, transformObjectToInnerString } from "@kottster/common";
 
 type TemplateVars = {
   'vite.config.js': undefined;
   'tsconfig.json': undefined;
+  'Dockerfile': undefined;
+  'docker-compose.yml': undefined;
   'app/_server/app.js': undefined;
   'app/_server/server.js': undefined;
   'app/_server/data-sources/postgres/index.js': {
-    connection?: string | {
-      host: string;
-      port: number;
-      user: string;
-      password: string;
-      database: string;
-    };
-    searchPath?: string;
+    connectionDetails?: Record<string, unknown>; 
   };
   'app/_server/data-sources/mysql/index.js': {
-    connection?: string | {
-      host: string;
-      port: number;
-      user: string;
-      password: string;
-      database: string;
-    };
+    connectionDetails?: Record<string, unknown>;
   };
   'app/_server/data-sources/mariadb/index.js': {
-    connection?: string | {
-      host: string;
-      port: number;
-      user: string;
-      password: string;
-      database: string;
-    };
+    connectionDetails?: Record<string, unknown>;
   };
   'app/_server/data-sources/sqlite/index.js': {
-    connection?: {
-      filename: string;
-    };
+    connectionDetails?: Record<string, unknown>;
   };
   'app/_server/data-sources/mssql/index.js': {
-    connection?: string | {
-      host: string;
-      port: number;
-      user: string;
-      password: string;
-      database: string;
-    };
-    searchPath?: string;
+    connectionDetails?: Record<string, unknown>;
   };
   'app/index.html': undefined;
   'app/main.jsx': undefined;
+  'app/schemas/sidebar.json': undefined;
 };
 
 /**
@@ -69,6 +44,7 @@ export class FileTemplateManager {
       import { defineConfig } from 'vite';
       import { vitePlugin as kottster } from '@kottster/react';
       import react from '@vitejs/plugin-react';
+      import schema from './kottster-app.json';
 
       export default defineConfig({
         root: './app',
@@ -79,10 +55,10 @@ export class FileTemplateManager {
         build: {
           outDir: '../dist/client',
           emptyOutDir: true,
-          chunkSizeWarningLimit: 1000,
+          chunkSizeWarningLimit: 10000,
         },
         plugins: [
-          kottster(),
+          kottster({ schema }),
           react(),
         ],
         resolve: {
@@ -127,18 +103,76 @@ export class FileTemplateManager {
       }
     `),
 
+    'Dockerfile': stripIndent(`
+      # For production deployment
+
+      FROM node:22-alpine AS builder
+      WORKDIR /app
+
+      COPY package*.json ./
+      RUN npm install
+
+      COPY . .
+      RUN npm run build
+
+      FROM node:22-alpine
+      WORKDIR /app
+
+      COPY package*.json ./
+      RUN npm install --omit=dev
+
+      COPY --from=builder /app/dist ./dist
+      COPY app.db ./app.db
+
+      ENV PORT=3000
+      EXPOSE $PORT
+
+      CMD ["node", "dist/server/server.cjs"]
+    `),
+
+    'docker-compose.yml': stripIndent(`
+      # For production deployment
+
+      version: '3.8'
+
+      services:
+        app:
+          build:
+            context: .
+            dockerfile: Dockerfile
+          ports:
+            - "3000:3000"
+          environment:
+            - PORT=3000
+    `),
+
     'app/_server/app.js': stripIndent(`
-      import { createApp } from '@kottster/server';
+      import { createApp, createIdentityProvider } from '@kottster/server';
       import schema from '../../kottster-app.json';
 
+      /* 
+       * For security, consider moving the secret data to environment variables.
+       * See https://kottster.app/docs/deploying#before-you-deploy
+       */
       export const app = createApp({
         schema,
+        secretKey: '<your-secret-key-here>',
 
-        /* 
-        * For security, consider moving the secret key to an environment variable: 
-        * https://kottster.app/docs/deploying#before-you-deploy
-        */
-        secretKey: process.env.SECRET_KEY,
+        
+        /*
+         * The identity provider configuration.
+         * See https://kottster.app/docs/app-configuration/identity-provider
+         */
+        identityProvider: createIdentityProvider('sqlite', {
+          fileName: 'app.db',
+
+          passwordHashAlgorithm: 'bcrypt',
+          jwtSecretSalt: '<your-jwt-secret-salt-here>',
+          
+          /* The root admin user credentials */
+          rootUsername: 'admin',
+          rootPassword: 'admin',
+        }),
       });
     `),
 
@@ -160,19 +194,18 @@ export class FileTemplateManager {
       import { KnexPgAdapter } from '@kottster/server';
       import knex from 'knex';
       
-      /**${!vars.connection ? ` \n         * Replace the following with your connection options. ` : ''}
+      /**${!vars.connectionDetails ? ` \n         * Replace the following with your connection options. ` : ''}
        * Learn more at https://knexjs.org/guide/#configuration-options
        */
       const client = knex({
-        client: 'pg',
-        connection: ${typeof vars.connection !== 'object' ? `'${vars.connection || 'postgresql://myuser:mypassword@localhost:5432/mydatabase'}',` : `{
-          host: '${vars.connection.host || 'localhost'}',
-          port: ${vars.connection.port ? Number(vars.connection.port) : '5432'},
-          user: '${vars.connection.user || 'myuser'}',
-          password: '${vars.connection.password || 'mypassword'}',
-          database: '${vars.connection.database || 'mydatabase'}',
-        },`}
-        searchPath: ['${vars.searchPath || 'public'}'],
+        client: 'pg', \n${vars.connectionDetails ? transformObjectToInnerString(vars.connectionDetails, '        ') : `        connection: {
+          host: 'localhost',
+          port: 5432,
+          user: 'myuser',
+          password: 'mypassword',
+          database: 'mydatabase',
+        },
+        searchPath: ['public'],`}
       });
 
       export default new KnexPgAdapter(client);
@@ -182,17 +215,16 @@ export class FileTemplateManager {
       import { KnexMysql2Adapter } from '@kottster/server';
       import knex from 'knex';
       
-      /**${!vars.connection ? ` \n         * Replace the following with your connection options. ` : ''}
+      /**${!vars.connectionDetails ? ` \n         * Replace the following with your connection options. ` : ''}
        * Learn more at https://knexjs.org/guide/#configuration-options
        */
       const client = knex({
-        client: 'mysql2',
-        connection: ${typeof vars.connection === 'string' ? `'${vars.connection}',` : `{
-          host: '${vars.connection?.host || 'localhost'}',
-          port: ${vars.connection?.port ? Number(vars.connection.port) : '3306'},
-          user: '${vars.connection?.user || 'myuser'}',
-          password: '${vars.connection?.password || 'mypassword'}',
-          database: '${vars.connection?.database || 'mydatabase'}',
+        client: 'mysql2', \n${vars.connectionDetails ? transformObjectToInnerString(vars.connectionDetails, '        ') : `        connection: {
+          host: 'localhost',
+          port: 3306,
+          user: 'myuser',
+          password: 'mypassword',
+          database: 'mydatabase',
         },`}
       });
 
@@ -203,17 +235,16 @@ export class FileTemplateManager {
       import { KnexMysql2Adapter } from '@kottster/server';
       import knex from 'knex';
       
-      /**${!vars.connection ? ` \n         * Replace the following with your connection options. ` : ''}
+      /**${!vars.connectionDetails ? ` \n         * Replace the following with your connection options. ` : ''}
        * Learn more at https://knexjs.org/guide/#configuration-options
        */
       const client = knex({
-        client: 'mysql2',
-        connection: ${typeof vars.connection === 'string' ? `'${vars.connection}',` : `{
-          host: '${vars.connection?.host || 'localhost'}',
-          port: ${vars.connection?.port ? Number(vars.connection.port) : '3307'},
-          user: '${vars.connection?.user || 'myuser'}',
-          password: '${vars.connection?.password || 'mypassword'}',
-          database: '${vars.connection?.database || 'mydatabase'}',
+        client: 'mysql2', \n${vars.connectionDetails ? transformObjectToInnerString(vars.connectionDetails, '        ') : `        connection: {
+          host: 'localhost',
+          port: 3307,
+          user: 'myuser',
+          password: 'mypassword',
+          database: 'mydatabase',
         },`}
       });
 
@@ -224,19 +255,18 @@ export class FileTemplateManager {
       import { KnexTediousAdapter } from '@kottster/server';
       import knex from 'knex';
       
-      /**
+      /**${!vars.connectionDetails ? ` \n         * Replace the following with your connection options. ` : ''}
        * Learn more at https://knexjs.org/guide/#configuration-options
        */
       const client = knex({
-        client: 'mssql',
-        connection: ${typeof vars.connection !== 'object' ? `'${vars.connection || 'mysql://myuser:mypassword@localhost:3306/mydatabase'}',` : `{
-          host: '${vars.connection.host || 'localhost'}',
-          port: ${vars.connection.port ? Number(vars.connection.port) : '5432'},
-          user: '${vars.connection.user || 'myuser'}',
-          password: '${vars.connection.password || 'mypassword'}',
-          database: '${vars.connection.database || 'mydatabase'}',
-        },`}
-        searchPath: ['${vars.searchPath || 'dbo'}'],
+        client: 'mssql', \n${vars.connectionDetails ? transformObjectToInnerString(vars.connectionDetails, '        ') : `        connection: {
+          host: 'localhost',
+          port: 5432,
+          user: 'myuser',
+          password: 'mypassword',
+          database: 'mydatabase',
+        },
+        searchPath: ['dbo'],`}
       });
 
       export default new KnexTediousAdapter(client);
@@ -246,14 +276,13 @@ export class FileTemplateManager {
       import { KnexBetterSqlite3Adapter } from '@kottster/server';
       import knex from 'knex';
       
-      /**${!vars.connection ? ` \n         * Replace the following with your connection options. ` : ''}
+      /**${!vars.connectionDetails ? ` \n         * Replace the following with your connection options. ` : ''}
        * Learn more at https://knexjs.org/guide/#configuration-options
        */
       const client = knex({
-        client: 'better-sqlite3',
-        connection: {
-          filename: '${vars.connection?.filename || '/path/to/database.sqlite'}',
-        }
+        client: 'better-sqlite3', \n${vars.connectionDetails ? transformObjectToInnerString(vars.connectionDetails, '        ') : `        connection: {
+          filename: '/path/to/database.sqlite',
+        },`}
       });
 
       export default new KnexBetterSqlite3Adapter(client);
@@ -288,6 +317,12 @@ export class FileTemplateManager {
           <KottsterApp pageEntries={pageEntries} />
         </React.StrictMode>
       );
+    `),
+
+    'app/schemas/sidebar.json': () => stripIndent(`
+      {
+        "menuPageOrder": []
+      }
     `),
   };
 

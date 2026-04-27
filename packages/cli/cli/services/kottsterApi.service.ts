@@ -1,4 +1,5 @@
 import os from 'os';
+import crypto from 'crypto';
 
 interface NewProjectCommandOptions {
   packageManager?: string;
@@ -10,13 +11,13 @@ interface NewProjectCommandOptions {
  */
 export class KottsterApi {
   public static get API_BASE_URL() {
-    return 'https://api.kottster.app';
+    return process.env.KOTTSTER_API_BASE_URL || 'https://api.kottster.app';
   }
 
   /**
    * Send usage data to the server when a new project is created using "@kottster/cli new".
    * Usage data includes only the following information:
-   * - Username of the user (being used to identify the commands coming from the same user)
+   * - Cryptographically hashed username (to differentiate users without storing personal info)
    * - Command stage (start, finish, error)
    * - Current date and time
    * - Platform (Windows, macOS, Linux)
@@ -62,7 +63,7 @@ export class KottsterApi {
         },
         body: JSON.stringify({
           command: 'new',
-          username,
+          username: username ? crypto.createHash('sha256').update(username).digest('hex') : undefined,
           stage,
           dateTime,
           platform,
@@ -74,6 +75,24 @@ export class KottsterApi {
       });
     } catch (error) {
       // eslint-disable-next-line no-empty
+    }
+  }
+
+  /**
+   * Fetch the list of available Kottster versions.
+   * @returns An array of version strings
+   */
+  static async getAvailableVersions(): Promise<string[]> {
+    try {
+      const response = await fetch(`${this.API_BASE_URL}/v3/versions`);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch versions: ${response.statusText}`);
+      }
+      const data = await response.json() as string[];
+      return data || [];
+    } catch (error) {
+      console.error('Error fetching available versions:', error);
+      return [];
     }
   }
 }

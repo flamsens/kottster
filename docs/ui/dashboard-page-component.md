@@ -4,10 +4,9 @@ description: "DashboardPage component in Kottster displays dynamic dashboards wi
 
 # DashboardPage component
 
-The `DashboardPage` component displays a dynamic dashboard with various statistics, charts, and data visualizations.
+The [`DashboardPage`](https://kottster.app/api-reference/interfaces/_kottster_react.DashboardPageProps.html) component displays a dynamic dashboard with various statistics, charts, and data visualizations.
 
-The component is tightly connected to the [`defineDashboardController`](../dashboard/configuration/api.md) settings, which manage both API interactions and dashboard behavior. If you want extra control over **how the dashboard looks or works on the client side**, you need to use the `DashboardPage` component.
-
+The component is tightly connected to the [dashboard page configuration](../dashboard/configuration/api.md) and backend API. You need to modify the `DashboardPage` component if you want extra control over **how the dashboard looks or works on the client side**.
 
 ## Properties
 
@@ -28,3 +27,9 @@ The component is tightly connected to the [`defineDashboardController`](../dashb
   `ReactNode`, optional
 
   A custom component displayed below the page header.
+
+- ### maxContentWidth
+
+  `number`, optional
+
+  The maximum width of the dashboard content area. This can be specified in pixels.

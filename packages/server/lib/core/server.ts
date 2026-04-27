@@ -1,6 +1,6 @@
 import { KottsterApp } from "../core/app";
-import { DataSource, Stage } from "@kottster/common";
-import express from 'express';
+import { DataSource, isAppSchemaEmpty, Page, Stage } from "@kottster/common";
+import express, { RequestHandler } from 'express';
 import path from 'path';
 import fs from 'fs';
 import { PROJECT_DIR } from "../constants/projectDir";
@@ -11,6 +11,8 @@ import { DataSourceRegistry } from "./dataSourceRegistry";
 import { FileReader } from "../services/fileReader.service";
 import { createDataSource } from "../factories/createDataSource";
 import { WebSocketServer } from 'ws';
+import { VERSION } from "../version";
+import { Request, type Express } from 'express';
 
 interface KottsterServerOptions {
   app: KottsterApp;
@@ -18,8 +20,8 @@ interface KottsterServerOptions {
 
 export class KottsterServer {
   private app: KottsterApp;
+  private expressApp: Express;
   private port: number;
-  private expressApp: express.Application;
   private server: Server;
   private wss: WebSocketServer;
 
@@ -36,11 +38,21 @@ export class KottsterServer {
     this.app = app;
     this.port = serverPort ? +serverPort : 3000;
     this.expressApp = express();
+
+    // Configure trust proxy if specified
+    const trustProxy = process.env.EXPRESS_TRUST_PROXY;
+    if (trustProxy === 'true' || trustProxy === '1') {
+      this.expressApp.set('trust proxy', true);
+    } else if (trustProxy) {
+      this.expressApp.set('trust proxy', trustProxy);
+    }
   }
 
   private setupMiddleware() {
-    this.expressApp.use(express.json());
-    this.expressApp.use(express.urlencoded({ extended: true }));
+    const bodyParserLimit = process.env.EXPRESS_BODY_PARSER_LIMIT || '25mb';
+    this.expressApp.use(express.json({ limit: bodyParserLimit }));
+    this.expressApp.use(express.urlencoded({ extended: true, limit: bodyParserLimit }));
+
     this.expressApp.use((req, res, next) => {
       Object.entries(commonHeaders).forEach(([key, value]) => {
         res.setHeader(key, value);
@@ -55,16 +67,23 @@ export class KottsterServer {
       next();
     });
   }
-
+  
   private setupServiceRoutes() {
-    this.expressApp.use('/internal-api/', this.app.getInternalApiRoute());
-    // this.expressApp.use('/devsync-api/', this.app.getDevSyncApiRoute());
+    this.expressApp.use(`${this.app.basePath}internal-api`, this.app.getInternalApiRoute());
+    this.expressApp.use(`${this.app.basePath}download/:operationId`, this.app.getDownloadRoute());
+    this.expressApp.use(`${this.app.basePath}idp/:type`, this.app.getIdpRoute());
+
+    if (this.app.stage === Stage.development) {
+      this.expressApp.get(this.app.basePath, (req, res) => {
+        res.send('Kottster API Server for development mode is running on this endpoint.');
+      });
+    }
   }
 
   private setupWebSocketHealthCheck() {
     this.wss = new WebSocketServer({ 
       server: this.server,
-      path: '/ws-health' 
+      path: `${this.app.basePath}ws-health`
     });
 
     this.wss.on('connection', (ws) => {
@@ -85,9 +104,15 @@ export class KottsterServer {
     });
   }
 
+  private checkIfAppSchemaIsEmpty() {
+    if (this.app.stage === Stage.production && isAppSchemaEmpty(this.app.schema)) {
+      throw new Error('The Kottster app is not initialized. You need to run the app in development mode to generate the initial files.');
+    }
+  }
+
   private async setupDynamicDataSources() {
     const isDevelopment = this.app.stage === Stage.development;
-    const fileReader = new FileReader();
+    const fileReader = new FileReader(isDevelopment);
 
     // Dynamically load data sources from the data-sources directory
     const dataSourcesDir = isDevelopment ? `${PROJECT_DIR}/app/_server/data-sources` : `${PROJECT_DIR}/dist/server/data-sources`;
@@ -96,7 +121,6 @@ export class KottsterServer {
       if (!fs.existsSync(dataSourcesDir)) {
         return;
       }
-
       const dataSources: DataSource[] = [];
       const dataSourceConfigs = fileReader.getDataSourceConfigs();
 
@@ -109,7 +133,6 @@ export class KottsterServer {
               const dataSourceModule = await import(dataSourcePath);
               if (dataSourceModule.default && typeof dataSourceModule.default === 'object') {
                 const dataSource = createDataSource({
-                  version: dataSourceConfig.version,
                   type: dataSourceConfig.type,
                   name: dataSourceConfig.name,
                   tablesConfig: dataSourceConfig.tablesConfig || {},
@@ -130,51 +153,76 @@ export class KottsterServer {
       }
 
       const dataSourceRegistry = new DataSourceRegistry(dataSources);
-      this.app.registerDataSources(dataSourceRegistry);
+      this.app.loadFromDataSourceRegistry(dataSourceRegistry);
     } catch (error) {
       console.error('Error reading data sources directory:', error);
     }
   }
-  
+
   private async setupDynamicRoutes() {
     const isDevelopment = this.app.stage === Stage.development;
-    const fileReader = new FileReader();
-    const pageConfigs = fileReader.getPageConfigs();
+    const loadedPageConfigs = this.app.loadPageConfigs();
 
-    // Set routes for pages specified in the schema
-    if (pageConfigs) {
-      for (const pageConfig of pageConfigs) {
-        const pagesDir = isDevelopment ? `${PROJECT_DIR}/app/pages` : `${PROJECT_DIR}/dist/server/pages`;
-        const usingTsc = this.app.usingTsc;
-        const apiPath = path.join(pagesDir, pageConfig.key, isDevelopment ? `api.server.${usingTsc ? 'ts' : 'js'}` : 'api.cjs');
+    // Register routes for pages with API handlers
+    if (loadedPageConfigs) {
+      for (const pageConfig of loadedPageConfigs) {
+        try {
+          const pagesDir = isDevelopment ? `${PROJECT_DIR}/app/pages` : `${PROJECT_DIR}/dist/server/pages`;
+          const usingTsc = this.app.usingTsc;
+          const apiPath = path.join(pagesDir, pageConfig.key, isDevelopment ? `api.server.${usingTsc ? 'ts' : 'js'}` : 'api.cjs');
 
-        // If the page is custom or has a defined api.server.js file, load it
-        if (pageConfig.type === 'custom' || fs.existsSync(apiPath)) {
-          try {
-            const routeModule = await import(apiPath);
-            if (routeModule.default && typeof routeModule.default === 'function') {
-              const routePath = `/api/${pageConfig.key}`;
-
-              this.expressApp.post(routePath, this.app.createRequestWithPageDataMiddleware(pageConfig), routeModule.default);
+          // If the page is custom or has a defined api.server.js file, load it
+          if (fs.existsSync(apiPath)) {
+            try {
+              const routeModule = await import(apiPath);
+              if (routeModule.default && typeof routeModule.default === 'function') {
+                const routePath = `${this.app.basePath}api/${pageConfig.key}`;
+                this.expressApp.post(routePath, this.createRequestWithPageDataMiddleware(pageConfig), routeModule.default);
+              }
+            } catch (error) {
+              console.error(`Failed to load route "${pageConfig.key}":`, error);
             }
-          } catch (error) {
-            console.error(`Failed to load route "${pageConfig.key}":`, error);
           }
-        } else {
-          if (pageConfig.type === 'table') {
-            if (!pageConfig.config.dataSource) {
-              console.warn(`Page "${pageConfig.key}" does not have a data source specified. Skipping route setup.`);
-              continue;
-            }
-
-            this.expressApp.post(`/api/${pageConfig.key}`, this.app.createRequestWithPageDataMiddleware(pageConfig), this.app.defineTableController(pageConfig.config));
-          }
-          if (pageConfig.type === 'dashboard') {
-            this.expressApp.post(`/api/${pageConfig.key}`, this.app.createRequestWithPageDataMiddleware(pageConfig), this.app.defineDashboardController(pageConfig.config));
-          }
+        } catch (error) {
+          console.error(`Error setting up route for page "${pageConfig.key}":`, error);
         }
       };
+
+      // Setup dynamic routes for basic pages without custom API handlers
+      this.expressApp.post(`${this.app.basePath}api/:pageKey`, async (req, res, next) => {
+        const pageKey = req.params.pageKey;
+        const loadedPageConfigs = this.app.loadPageConfigs();
+        const pageConfig = loadedPageConfigs.find(p => p.key === pageKey);
+
+        if (!pageConfig) {
+          res.status(404).send({ error: 'Page not found' });
+          return;
+        }
+
+        // Attach page config to request object
+        (req as Request & { page?: Page }).page = pageConfig;
+
+        switch (pageConfig.type) {
+          case 'table':
+            return this.app.defineTableController({})(req, res, next);
+          case 'dashboard':
+            return this.app.defineDashboardController({})(req, res, next);
+          default:
+            res.status(400).send({ error: 'Unsupported page type for API route' });
+            return;
+        };
+      });
     }
+  }
+
+  private createRequestWithPageDataMiddleware(pageConfig: Page): RequestHandler {
+    const handler: RequestHandler = (req, res, next) => {
+      (req as Request & { page?: Page }).page = pageConfig;
+
+      next();
+    };
+
+    return handler;
   }
 
   private setupStaticFiles() {
@@ -184,10 +232,14 @@ export class KottsterServer {
 
     const clientDir = path.join(PROJECT_DIR, 'dist', 'client');
     if (fs.existsSync(clientDir)) {
-      this.expressApp.use(express.static(clientDir));
+      if (this.app.basePath === '/') {
+        this.expressApp.use(express.static(clientDir));
+      } else {
+        this.expressApp.use(this.app.basePath, express.static(clientDir));
+      }
       
       // Matching all GET requests
-      this.expressApp.get('/{*splat}', (req, res) => {
+      this.expressApp.get(`${this.app.basePath}{*splat}`, (req, res) => {
         const indexPath = path.join(clientDir, 'index.html');
         if (fs.existsSync(indexPath)) {
           res.sendFile(indexPath);
@@ -196,7 +248,7 @@ export class KottsterServer {
         }
       });
     } else {
-      throw new Error(`Client directory not found: ${clientDir}`);
+      console.warn(`Client directory not found: ${clientDir}`);
     }
   }
 
@@ -212,17 +264,24 @@ export class KottsterServer {
   }
 
   public async start() {
+    this.checkIfAppSchemaIsEmpty();
     this.checkDistDirectoryExists();
+    if (this.app.configureExpressApp) {
+      this.app.configureExpressApp(this.expressApp);
+    }
     this.setupMiddleware();
     this.setupServiceRoutes();
     await this.setupDynamicDataSources();
     await this.setupDynamicRoutes();
     this.setupStaticFiles();
+    
+    // Initialize the app
+    await this.app.initialize();
 
     this.server = this.expressApp.listen(this.port, () => {
       if (this.app.stage === Stage.production) {
         // Show server info on startup
-        console.info(`Server is running on ${chalk.bold(`http://localhost:${this.port}`)} in production mode`);
+        console.log(`\n${chalk.bold.green(`Kottster v${VERSION || '???'}`)} is running on ${chalk.cyan(`http://localhost:${this.port}${this.app.basePath}`)} ${chalk.gray('(production mode)')}\n`);
       }
 
       // Setup websocket health check if in development mode

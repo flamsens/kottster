@@ -22,7 +22,7 @@ Kottster table pages let you **view and manage data** in your database tables.
 Each table page requires a `page.json` configuration file in its own directory under `app/pages/<pageKey>`. The `<pageKey>` becomes the URL path where your page will be accessible (e.g., `/users` for a page in `./app/pages/users/`).
 
 ### Configuration file (`page.json`)
-This file defines the table page configuration and is the only required file. You can edit it using the visual editor or modify the file manually.
+This file defines the table page configuration and is the only required file. You can edit it using the visual builder or modify the file manually.
 
 **Example:**
 
@@ -41,32 +41,28 @@ This file defines the table page configuration and is the only required file. Yo
 }
 ```
 
-### Optional customization files
+### Additional files
 
-If you need additional customization beyond what the visual editor provides, you can add these optional files:
+If you need additional customization beyond what the visual builder provides, you can add these optional files:
 
 #### Backend controller (`api.server.js`)
-This file handles custom backend logic and database interactions. Use this when you need custom fetching logic, validations, or hooks beyond what's configured in `page.json`.
+This file handles custom backend logic and database interactions. You can modify it when you need custom fetching logic, validations, or hooks beyond what's configured in `page.json`.
 
 **Example:**
 
 ```js [app/pages/users/api.server.js]
 import { app } from '../../_server/app';
-import page from './page.json';
 
-// Default export the controller for handling table requests
-const controller = app.defineTableController({
-  ...page.config,
-  // Add custom configuration or logic here
-});
+const controller = app.defineTableController({});
 
 export default controller;
 ```
 
-The backend controller uses [`defineTableController`](./configuration/api.md) to extend the base configuration from `page.json` with custom logic.
+You basically extend the base configuration from `page.json` with custom logic using [`defineTableController`](./configuration/api.md).
 
 #### Frontend component (`index.jsx`)
-This file defines custom user interface components. Use this when you need to customize the table display or add custom functionality.
+
+The file should export the [`TablePage`](../ui/table-page-component.md) component, which renders the table page and automatically connects to your backend configuration. You can customize the UI and add additional components by passing props to the `TablePage` component.
 
 **Example:**
 
@@ -78,27 +74,25 @@ export default () => (
 );
 ```
 
-The frontend component returns the [`TablePage`](../ui/table-page-component.md) component, which automatically connects to your backend configuration. You don't need to pass additional parameters as it's tightly integrated with the backend API.
-
 ## Creating table pages
 
 You have two options for creating table pages:
 
-### Option 1: Visual editor (recommended)
+### Option 1: Using visual builder (recommended)
 
-The fastest way to create table pages is using Kottster's visual editor. It connects to your database, analyzes tables and relationships, and generates fully functional pages with a single click.
+The fastest way to create table pages is using Kottster's visual builder. It connects to your database, analyzes tables and relationships, and generates fully functional pages with a single click.
 
-![Adding a table page using the visual editor](./adding-table-page.png)
+![Adding a table page using the visual builder](./adding-table-page.png)
 
-When you use the visual editor, it creates a `page.json` file with your table configuration. It contains your page configuration and is automatically managed by the visual editor. If you need additional customization beyond what the visual editor offers, you can create optional `api.server.js` and `index.jsx` files as described above.
+When you use the visual builder, it creates a `page.json` file with your table configuration. It contains your page configuration and is automatically managed by the visual builder. If you need additional customization beyond what the visual builder offers, you can create optional `api.server.js` and `index.jsx` files as described above.
 
 ::: info
-The visual editor manages the `page.json` file automatically. Even though you can edit it manually, it's recommended to use the visual editor for creating and configuring table pages. This ensures that all necessary configurations are correctly set up and reduces the risk of errors.
+The visual builder manages the `page.json` file automatically. Even though you can edit it manually, it's recommended to use the visual builder for creating and configuring table pages. This ensures that all necessary configurations are correctly set up and reduces the risk of errors.
 :::
 
 ### Option 2: Manual creation
 
-For more control or custom requirements, you can manually create the `page.json` file in your `./app/pages/<pageKey>` directory. Add optional `api.server.js` and `index.jsx` files only if you need additional customization beyond the base table functionality.
+For more control or custom requirements, you can manually create the `page.json` file in your `./app/pages/<pageKey>` directory. Add optional `api.server.js` and `index.jsx` files if needed.
 
 ## Examples
 
